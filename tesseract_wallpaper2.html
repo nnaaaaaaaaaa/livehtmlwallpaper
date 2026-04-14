@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+const verts4D = [];
+for (let x=-1;x<=1;x+=2) for (let y=-1;y<=1;y+=2)
+  for (let z=-1;z<=1;z+=2) for (let w=-1;w<=1;w+=2)
+    verts4D.push([x,y,z,w]);
+
+const edges = [];
+for (let i=0;i<16;i++) for (let j=i+1;j<16;j++) {
+  let d=0; for (let k=0;k<4;k++) if (verts4D[i][k]!==verts4D[j][k]) d++;
+  if (d===1) edges.push([i,j]);
+}
+
+function applyRot(vx, vy, ang) {
+  const c=Math.cos(ang), s=Math.sin(ang);
+  return [c*vx - s*vy, s*vx + c*vy];
+}
+
+function project(t) {
+  const a0=t*0.18, a1=t*0.13, a2=t*0.09, a3=t*0.05, a4=t*0.11;
+  const result = new Array(16);
+  for (let i=0;i<16;i++) {
+    let [x,y,z,w] = verts4D[i];
+    [x,y] = applyRot(x,y,a0);
+    [z,w] = applyRot(z,w,a1);
+    [x,w] = applyRot(x,w,a2);
+    [y,z] = applyRot(y,z,a3);
+    [y,w] = applyRot(y,w,a4);
+    const d4=2.5, d3=3.5;
+    const w4=1/(d4-w);
+    const x3=x*w4, y3=y*w4, z3=z*w4;
+    const w3=1/(d3-z3);
+    result[i] = { sx: x3*w3, sy: y3*w3, depth: w4 };
+  }
+  return result;
+}
+
+const TRAIL_LEN = 8;
+const trailAlpha = [1.00, 0.60, 0.40, 0.25, 0.14, 0.07, 0.03, 0.01];
+const trailBuf = new Array(TRAIL_LEN).fill(null);
+let trailIdx = 0;
+
+const INNER = [60,140,255];
+const OUTER = [40,200,160];
+const MID   = [160,135,155];
+
+function rgba([r,g,b], a) {
+  return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+}
+
+const stars = Array.from({length:200}, () => ({
+  x: Math.random(), y: Math.random(),
+  r: Math.random()*1.8+0.5,
+  a: Math.random()*0.4+0.55,
+  tw: Math.random()*Math.PI*2
+}));
+
+let t = 0;
+
+function draw(ts) {
+  t = ts * 0.001;
+  const W = canvas.width, H = canvas.height;
+  const scale = Math.min(W,H) * 1.75;
+  const cx = W/2, cy = H/2;
+
+  ctx.fillStyle = '#030408';
+  ctx.fillRect(0,0,W,H);
+
+  for (const s of stars) {
+    const tw = 0.7 + 0.3*Math.sin(t*1.5 + s.tw);
+    ctx.beginPath();
+    ctx.arc(s.x*W, s.y*H, s.r, 0, Math.PI*2);
+    ctx.fillStyle = `rgba(255,255,255,${(s.a*tw).toFixed(3)})`;
+    ctx.fill();
+  }
+
+  const curPts = project(t);
+  trailBuf[trailIdx] = curPts;
+  trailIdx = (trailIdx + 1) % TRAIL_LEN;
+
+  // 残光（古い順）
+  for (let ti = TRAIL_LEN-1; ti >= 1; ti--) {
+    const bufIdx = (trailIdx - 1 - ti + TRAIL_LEN*2) % TRAIL_LEN;
+    const pts = trailBuf[bufIdx];
+    if (!pts) continue;
+    const alpha = trailAlpha[ti];
+    for (const [i,j] of edges) {
+      const wi = verts4D[i][3], wj = verts4D[j][3];
+      const sameW = wi===wj;
+      const col = sameW ? (wi===1 ? OUTER : INNER) : MID;
+      const dep = Math.min(1, Math.max(0.25, (pts[i].depth+pts[j].depth)*0.25+0.5));
+      ctx.beginPath();
+      ctx.moveTo(pts[i].sx*scale+cx, pts[i].sy*scale+cy);
+      ctx.lineTo(pts[j].sx*scale+cx, pts[j].sy*scale+cy);
+      ctx.strokeStyle = rgba(col, alpha * dep * (sameW ? 1.0 : 0.55));
+      ctx.lineWidth = sameW ? 1.8 : 0.9;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+  }
+
+  const px = curPts.map(p => ({
+    sx: p.sx*scale+cx, sy: p.sy*scale+cy, d: p.depth
+  }));
+
+  // 現在フレーム：グロー（shadowBlurなし・screen合成で発光感）
+  ctx.globalCompositeOperation = 'screen';
+  for (const [i,j] of edges) {
+    const wi = verts4D[i][3], wj = verts4D[j][3];
+    const sameW = wi===wj;
+    const col = sameW ? (wi===1 ? OUTER : INNER) : MID;
+    const dep = Math.min(1, Math.max(0.25, (px[i].d+px[j].d)*0.25+0.5));
+    const m = sameW ? 1 : 0.6;
+    ctx.lineCap = 'round';
+    // 外ハロー
+    ctx.beginPath(); ctx.moveTo(px[i].sx,px[i].sy); ctx.lineTo(px[j].sx,px[j].sy);
+    ctx.strokeStyle = rgba(col, 0.08*dep*m); ctx.lineWidth = sameW?22:11; ctx.stroke();
+    // 中間
+    ctx.beginPath(); ctx.moveTo(px[i].sx,px[i].sy); ctx.lineTo(px[j].sx,px[j].sy);
+    ctx.strokeStyle = rgba(col, 0.22*dep*m); ctx.lineWidth = sameW?8:4; ctx.stroke();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+
+  // コアライン
+  for (const [i,j] of edges) {
+    const wi = verts4D[i][3], wj = verts4D[j][3];
+    const sameW = wi===wj;
+    const col = sameW ? (wi===1 ? OUTER : INNER) : MID;
+    const dep = Math.min(1, Math.max(0.25, (px[i].d+px[j].d)*0.25+0.5));
+    ctx.beginPath(); ctx.moveTo(px[i].sx,px[i].sy); ctx.lineTo(px[j].sx,px[j].sy);
+    ctx.strokeStyle = rgba(col, 0.95*dep*(sameW?1:0.65));
+    ctx.lineWidth = sameW ? 1.8 : 0.9;
+    ctx.lineCap = 'round'; ctx.stroke();
+  }
+
+  // 頂点
+  for (let idx=0;idx<16;idx++) {
+    const w = verts4D[idx][3];
+    const col = w===1 ? OUTER : INNER;
+    const {sx,sy,d} = px[idx];
+    const dep = Math.min(1, Math.max(0.2, d*0.5+0.5));
+    ctx.beginPath(); ctx.arc(sx,sy,8,0,Math.PI*2);
+    ctx.fillStyle = rgba(col, 0.18*dep); ctx.fill();
+    ctx.beginPath(); ctx.arc(sx,sy,3.5,0,Math.PI*2);
+    ctx.fillStyle = rgba(col, dep); ctx.fill();
+  }
+
+  // Vignette
+  const vig = ctx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.25,W/2,H/2,Math.max(W,H)*0.72);
+  vig.addColorStop(0,'rgba(0,0,0,0)');
+  vig.addColorStop(1,'rgba(0,0,0,0.55)');
+  ctx.fillStyle = vig; ctx.fillRect(0,0,W,H);
+
+  requestAnimationFrame(draw);
+}
+
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

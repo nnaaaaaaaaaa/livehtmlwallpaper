@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D Dungeon</title>
+<style>* { margin:0; padding:0; } body { background:#000; overflow:hidden; }</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+// Offscreen canvases for smooth crossfade
+const offA = document.createElement("canvas");
+const offB = document.createElement("canvas");
+const ctxA = offA.getContext("2d");
+const ctxB = offB.getContext("2d");
+let W, H, CX, CY;
+
+function resize() {
+  W = canvas.width = offA.width = offB.width = window.innerWidth;
+  H = canvas.height = offA.height = offB.height = window.innerHeight;
+  CX = W/2; CY = H/2;
+}
+resize();
+window.addEventListener("resize", resize);
+
+// --- Maze ---
+const MW=17, MH=17;
+const DX=[0,1,0,-1], DY=[-1,0,1,0];
+const OPP=[2,3,0,1];
+const DN=['n','e','s','w'];
+let maze=[];
+function initMaze() {
+  maze = Array.from({length:MH},()=>Array.from({length:MW},()=>({n:true,e:true,s:true,w:true})));
+  const vis = Array.from({length:MH},()=>new Array(MW).fill(false));
+  const stack=[[1,1]]; vis[1][1]=true;
+  while(stack.length) {
+    const [cx,cy]=stack[stack.length-1];
+    const nb=[];
+    for(let d=0;d<4;d++){const nx=cx+DX[d],ny=cy+DY[d];if(nx>0&&nx<MW-1&&ny>0&&ny<MH-1&&!vis[ny][nx])nb.push([nx,ny,d]);}
+    if(!nb.length){stack.pop();continue;}
+    const [nx,ny,d]=nb[Math.floor(Math.random()*nb.length)];
+    maze[cy][cx][DN[d]]=false; maze[ny][nx][DN[OPP[d]]]=false;
+    vis[ny][nx]=true; stack.push([nx,ny]);
+  }
+}
+initMaze();
+
+// --- Player ---
+let px=1,py=1,pdir=1,fromX=1,fromY=1,fromDir=1;
+let visited=new Set(['1,1']);
+function chooseMove() {
+  const opts=[];
+  for(let d=0;d<4;d++){
+    if(maze[py][px][DN[d]])continue;
+    const nx=px+DX[d],ny=py+DY[d];
+    opts.push({d,nx,ny,fresh:!visited.has(`${nx},${ny}`)});
+  }
+  if(!opts.length)return null;
+  const noBack=opts.filter(o=>o.d!==OPP[pdir]);
+  const pool=noBack.length?noBack:opts;
+  const fresh=pool.filter(o=>o.fresh);
+  return (fresh.length?fresh:pool)[Math.floor(Math.random()*(fresh.length||pool.length))];
+}
+
+// --- Color ---
+let hue=150,targetHue=150,hueT=1;
+function scheduleColor(){setTimeout(()=>{targetHue=Math.random()*360;hueT=0;scheduleColor();},5000+Math.random()*12000);}
+scheduleColor();
+function lerpHue(a,b,t){return(a+((b-a+540)%360-180)*t+360)%360;}
+
+// --- Render ---
+const MAX_D=8;
+// Use W and H independently so the corridor matches the screen's aspect ratio
+function getFrame(d){const sx=W*0.44/d,sy=H*0.44/d;return{l:CX-sx,r:CX+sx,t:CY-sy,b:CY+sy};}
+
+function renderViewTo(c, vx, vy, vd) {
+  const ld=(vd+3)%4, rd=(vd+1)%4;
+  function ln(x1,y1,x2,y2,a,lw=1){
+    c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);
+    c.strokeStyle=`hsla(${hue},85%,65%,${a})`;c.lineWidth=lw;c.stroke();
+  }
+  const segs=[]; let x=vx,y=vy;
+  for(let depth=1;depth<=MAX_D;depth++){
+    if(x<0||x>=MW||y<0||y>=MH)break;
+    const wF=maze[y][x][DN[vd]],wL=maze[y][x][DN[ld]],wR=maze[y][x][DN[rd]];
+    segs.push({depth,wF,wL,wR});
+    if(wF)break;
+    x+=DX[vd];y+=DY[vd];
+  }
+  if(!segs.length)return;
+
+  // Far wall
+  const last=segs[segs.length-1];
+  if(last.wF){
+    const f=getFrame(last.depth+1),a=0.18+0.28*(1-last.depth/MAX_D);
+    ln(f.l,f.t,f.r,f.t,a,1.2);ln(f.r,f.t,f.r,f.b,a,1.2);ln(f.r,f.b,f.l,f.b,a,1.2);ln(f.l,f.b,f.l,f.t,a,1.2);
+  }
+
+  // Corridor panels
+  for(let i=segs.length-1;i>=0;i--){
+    const {depth:d,wF,wL,wR}=segs[i];
+    const fN=getFrame(d),fF=getFrame(d+1);
+    const a=0.22+0.68*(1-(d-1)/MAX_D);
+    ln(fN.l,fN.t,fF.l,fF.t,a*.5,1.0);ln(fN.r,fN.t,fF.r,fF.t,a*.5,1.0);
+    ln(fN.l,fN.b,fF.l,fF.b,a*.5,1.0);ln(fN.r,fN.b,fF.r,fF.b,a*.5,1.0);
+    if(wL){
+      ln(fN.l,fN.t,fF.l,fF.t,a*.85,1.4);ln(fN.l,fN.b,fF.l,fF.b,a*.85,1.4);
+      ln(fN.l,fN.t,fN.l,fN.b,a*.98,1.6);ln(fF.l,fF.t,fF.l,fF.b,a*.55,1.1);
+    } else if(i===0||segs[i-1].wL) ln(fN.l,fN.t,fN.l,fN.b,a*.85,1.4);
+    if(wR){
+      ln(fN.r,fN.t,fF.r,fF.t,a*.85,1.4);ln(fN.r,fN.b,fF.r,fF.b,a*.85,1.4);
+      ln(fN.r,fN.t,fN.r,fN.b,a*.98,1.6);ln(fF.r,fF.t,fF.r,fF.b,a*.55,1.1);
+    } else if(i===0||segs[i-1].wR) ln(fN.r,fN.t,fN.r,fN.b,a*.85,1.4);
+  }
+
+  // Near frame (depth 1)
+  const f1=getFrame(1);
+  ln(f1.l,f1.t,f1.r,f1.t,.98,2.4);ln(f1.r,f1.t,f1.r,f1.b,.98,2.4);
+  ln(f1.r,f1.b,f1.l,f1.b,.98,2.4);ln(f1.l,f1.b,f1.l,f1.t,.98,2.4);
+
+  // Closest walls — player's own cell (depth ~0.65, partially off-screen)
+  const fC=getFrame(0.65);
+  const nearA=0.8;
+  if(maze[vy][vx][DN[ld]]){
+    ln(fC.l,fC.t,f1.l,f1.t,nearA,2.0);
+    ln(fC.l,fC.b,f1.l,f1.b,nearA,2.0);
+  }
+  if(maze[vy][vx][DN[rd]]){
+    ln(fC.r,fC.t,f1.r,f1.t,nearA,2.0);
+    ln(fC.r,fC.b,f1.r,f1.b,nearA,2.0);
+  }
+}
+
+// --- Animation ---
+let animT=1.0;
+const ANIM_SPEED=0.0064;  // slow and smooth for PC
+const PAUSE=0;
+let pauseCount=0;
+const ZOOM=1.18;
+
+// Sinusoidal ease — very smooth
+function ease(t){return .5-.5*Math.cos(t*Math.PI);}
+
+function startMove(){
+  const m=chooseMove();
+  if(!m){initMaze();px=1;py=1;pdir=1;visited.clear();return;}
+  fromX=px;fromY=py;fromDir=pdir;
+  pdir=m.d;px=m.nx;py=m.ny;
+  visited.add(`${px},${py}`);
+  if(visited.size>MW*MH*.75)visited.clear();
+  animT=0;
+}
+
+function loop(){
+  if(hueT<1){hueT=Math.min(1,hueT+.005);hue=lerpHue(hue,targetHue,hueT);}
+  if(animT>=1){if(++pauseCount>=PAUSE){pauseCount=0;startMove();}}
+  else{animT=Math.min(1,animT+ANIM_SPEED);}
+
+  // Background
+  ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
+  const g=ctx.createRadialGradient(CX,CY,0,CX,CY,Math.max(W,H)*.5);
+  g.addColorStop(0,`hsla(${hue},55%,5%,1)`);g.addColorStop(1,'#000');
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+
+  const t=ease(animT);
+  const fromScale=1+t*(ZOOM-1);   // 1 → ZOOM (zoom in as we leave)
+  const toScale=ZOOM-t*(ZOOM-1);  // ZOOM → 1 (settle into new position)
+
+  // Render "from" view
+  ctxA.clearRect(0,0,W,H);
+  renderViewTo(ctxA,fromX,fromY,fromDir);
+
+  // Render "to" view
+  ctxB.clearRect(0,0,W,H);
+  renderViewTo(ctxB,px,py,pdir);
+
+  // Crossfade: from fades out while zooming, to fades in while settling
+  ctx.save();
+  ctx.globalAlpha=1-t;
+  ctx.translate(CX,CY);ctx.scale(fromScale,fromScale);ctx.translate(-CX,-CY);
+  ctx.drawImage(offA,0,0);
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha=t;
+  ctx.translate(CX,CY);ctx.scale(toScale,toScale);ctx.translate(-CX,-CY);
+  ctx.drawImage(offB,0,0);
+  ctx.restore();
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

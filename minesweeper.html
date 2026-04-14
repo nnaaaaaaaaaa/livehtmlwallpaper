@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>マインスイーパー</title>
+<style>
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; margin: 0; padding: 0; }
+body { background: #f5f5f5; font-family: -apple-system, sans-serif; display: flex; justify-content: center; padding: 16px 8px; min-height: 100vh; }
+#app { width: 100%; max-width: 400px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+h1 { font-size: 20px; font-weight: 600; color: #222; }
+#difficulty { display: flex; gap: 8px; }
+.diff-btn { padding: 6px 14px; font-size: 13px; border-radius: 8px; border: 1px solid #ccc; background: #fff; cursor: pointer; color: #555; }
+.diff-btn.active { background: #333; color: #fff; border-color: #333; }
+#header { display: flex; align-items: center; gap: 14px; }
+.stat { font-size: 18px; font-weight: 600; background: #e8e8e8; border-radius: 8px; padding: 5px 12px; min-width: 62px; text-align: center; color: #222; }
+#rbtn { width: 44px; height: 44px; border-radius: 50%; border: 1px solid #ccc; background: #fff; font-size: 22px; cursor: pointer; }
+#board-wrap { overflow-x: auto; width: 100%; display: flex; justify-content: center; }
+table { border-collapse: separate; border-spacing: 2px; }
+td { width: 34px; height: 34px; border-radius: 6px; text-align: center; vertical-align: middle; font-size: 15px; font-weight: 700; cursor: pointer; border: 1px solid #bbb; background: #e0e0e0; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+td.open { background: #fff; border-color: #ddd; }
+td.flagged { background: #FAEEDA; border-color: #FAC775; }
+td.mine { background: #FCEBEB; border-color: #F09595; }
+td.mine-hit { background: #E24B4A; border-color: #A32D2D; color: #fff; }
+#msg { font-size: 15px; color: #555; min-height: 22px; text-align: center; }
+#hint { font-size: 12px; color: #999; text-align: center; }
+#solving { font-size: 12px; color: #aaa; text-align: center; min-height: 16px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>💣 マインスイーパー</h1>
+  <div id="difficulty">
+    <button class="diff-btn active" onclick="setDiff(0)">かんたん</button>
+    <button class="diff-btn" onclick="setDiff(1)">ふつう</button>
+    <button class="diff-btn" onclick="setDiff(2)">むずかしい</button>
+  </div>
+  <div id="header">
+    <div class="stat" id="mcnt">💣 10</div>
+    <button id="rbtn" onclick="initGame()">🙂</button>
+    <div class="stat" id="tmr">⏱ 0</div>
+  </div>
+  <div id="board-wrap"><div id="brd"></div></div>
+  <div id="msg"></div>
+  <div id="solving"></div>
+  <div id="hint">長押し → 🚩 フラグ</div>
+</div>
+
+<script>
+var DIFFS = [{r:9,c:9,m:10},{r:12,c:12,m:25},{r:16,c:9,m:35}];
+var CUR = 0;
+var ROWS, COLS, MINES;
+var board, rev, flg, mine;
+var over, first, fcnt, hit, sec, tim;
+var COLORS = ['#aaa','#378ADD','#3B6D11','#E24B4A','#185FA5','#A32D2D','#0F6E56','#333','#888'];
+
+function setDiff(d) {
+  CUR = d;
+  var btns = document.querySelectorAll('.diff-btn');
+  for (var i = 0; i < btns.length; i++) btns[i].className = 'diff-btn' + (i === d ? ' active' : '');
+  initGame();
+}
+
+function initGame() {
+  clearInterval(tim);
+  var df = DIFFS[CUR];
+  ROWS = df.r; COLS = df.c; MINES = df.m;
+  var N = ROWS * COLS;
+  board = []; rev = []; flg = []; mine = [];
+  for (var i = 0; i < N; i++) { board.push(0); rev.push(false); flg.push(false); mine.push(false); }
+  over = false; first = true; fcnt = 0; hit = -1; sec = 0;
+  document.getElementById('tmr').textContent = '⏱ 0';
+  document.getElementById('mcnt').textContent = '💣 ' + MINES;
+  document.getElementById('msg').textContent = '';
+  document.getElementById('solving').textContent = '';
+  document.getElementById('rbtn').textContent = '🙂';
+  render();
+}
+
+function idx(r, c) { return r * COLS + c; }
+
+function shuffle(pool) {
+  var i, j, t;
+  for (i = pool.length - 1; i > 0; i--) {
+    j = Math.floor(Math.random() * (i + 1));
+    t = pool[i]; pool[i] = pool[j]; pool[j] = t;
+  }
+}
+
+function calcBoard() {
+  for (var r = 0; r < ROWS; r++) {
+    for (var c = 0; c < COLS; c++) {
+      if (mine[idx(r,c)]) { board[idx(r,c)] = -1; continue; }
+      var cnt = 0;
+      for (var dr = -1; dr <= 1; dr++) for (var dc = -1; dc <= 1; dc++) {
+        var nr = r+dr, nc = c+dc;
+        if (nr>=0&&nr<ROWS&&nc>=0&&nc<COLS&&mine[idx(nr,nc)]) cnt++;
+      }
+      board[idx(r,c)] = cnt;
+    }
+  }
+}
+
+function tryPlaceMines(safe) {
+  var N = ROWS * COLS;
+  for (var i = 0; i < N; i++) { mine[i] = false; }
+  var pool = [];
+  for (var i = 0; i < N; i++) if (i !== safe) pool.push(i);
+  shuffle(pool);
+  for (var i = 0; i < MINES; i++) mine[pool[i]] = true;
+  calcBoard();
+}
+
+// Solver: simulate optimal logical play from startIdx
+// Returns true if the board can be solved without guessing
+function isSolvable(startIdx) {
+  var N = ROWS * COLS;
+  var tRev = [], tFlg = [];
+  for (var i = 0; i < N; i++) { tRev.push(false); tFlg.push(false); }
+  tRev[startIdx] = true;
+
+  var changed = true;
+  while (changed) {
+    changed = false;
+    for (var r = 0; r < ROWS; r++) {
+      for (var c = 0; c < COLS; c++) {
+        var i = idx(r,c);
+        if (!tRev[i] || mine[i]) continue;
+        var val = board[i];
+        var unrev = [];
+        var fCnt = 0;
+        for (var dr = -1; dr <= 1; dr++) {
+          for (var dc = -1; dc <= 1; dc++) {
+            if (dr===0&&dc===0) continue;
+            var nr = r+dr, nc = c+dc;
+            if (nr<0||nr>=ROWS||nc<0||nc>=COLS) continue;
+            var ni = idx(nr,nc);
+            if (tFlg[ni]) fCnt++;
+            else if (!tRev[ni]) unrev.push(ni);
+          }
+        }
+        var rem = val - fCnt;
+        if (rem === 0 && unrev.length > 0) {
+          for (var k = 0; k < unrev.length; k++) { tRev[unrev[k]] = true; changed = true; }
+        } else if (rem > 0 && rem === unrev.length) {
+          for (var k = 0; k < unrev.length; k++) { tFlg[unrev[k]] = true; changed = true; }
+        }
+      }
+    }
+  }
+
+  for (var i = 0; i < N; i++) {
+    if (!mine[i] && !tRev[i]) return false;
+  }
+  return true;
+}
+
+function placeMinesNoGuess(safe) {
+  var attempts = 0, maxAttempts = 500;
+  document.getElementById('solving').textContent = 'ボードを生成中...';
+  tryPlaceMines(safe);
+  while (!isSolvable(safe) && attempts < maxAttempts) {
+    tryPlaceMines(safe);
+    attempts++;
+  }
+  if (attempts >= maxAttempts) {
+    document.getElementById('solving').textContent = '※このボードは推測が必要な場合があります';
+  } else {
+    document.getElementById('solving').textContent = '✓ ギャンブルなし（' + (attempts+1) + '回目で生成）';
+  }
+}
+
+function openCell(r, c) {
+  if (r<0||r>=ROWS||c<0||c>=COLS) return;
+  var i = idx(r,c);
+  if (rev[i] || flg[i] || over) return;
+  rev[i] = true;
+  if (mine[i]) {
+    hit = i; over = true;
+    clearInterval(tim);
+    for (var k = 0; k < ROWS*COLS; k++) if (mine[k]) rev[k] = true;
+    document.getElementById('rbtn').textContent = '😵';
+    document.getElementById('msg').textContent = '💥 ゲームオーバー！もう一度？';
+  }
+}
+
+function tap(r, c) {
+  if (over) return;
+  var i = idx(r,c);
+  if (rev[i] || flg[i]) return;
+  if (first) {
+    first = false;
+    placeMinesNoGuess(i);
+    tim = setInterval(function() {
+      sec++;
+      document.getElementById('tmr').textContent = '⏱ ' + (sec > 999 ? 999 : sec);
+    }, 1000);
+  }
+  openCell(r, c);
+  if (!over) checkWin();
+  render();
+}
+
+function doFlag(r, c) {
+  if (over) return;
+  var i = idx(r,c);
+  if (rev[i]) return;
+  flg[i] = !flg[i];
+  fcnt += flg[i] ? 1 : -1;
+  document.getElementById('mcnt').textContent = '💣 ' + (MINES - fcnt);
+  render();
+}
+
+function checkWin() {
+  var un = 0;
+  for (var i = 0; i < ROWS*COLS; i++) if (!rev[i]) un++;
+  if (un === MINES) {
+    clearInterval(tim); over = true;
+    document.getElementById('rbtn').textContent = '🎉';
+    document.getElementById('msg').textContent = '🎊 クリア！ ' + sec + ' 秒';
+  }
+}
+
+function render() {
+  var brd = document.getElementById('brd');
+  brd.innerHTML = '';
+  var tbl = document.createElement('table');
+  for (var r = 0; r < ROWS; r++) {
+    var tr = document.createElement('tr');
+    for (var c = 0; c < COLS; c++) {
+      (function(r, c) {
+        var i = idx(r,c);
+        var td = document.createElement('td');
+        if (rev[i]) {
+          if (mine[i]) {
+            td.className = i === hit ? 'mine-hit' : 'mine';
+            td.textContent = '💣';
+          } else {
+            td.className = 'open';
+            td.textContent = board[i];
+            td.style.color = COLORS[board[i]];
+          }
+        } else if (flg[i]) {
+          td.className = 'flagged';
+          td.textContent = '🚩';
+        }
+
+        var pt = null, mv = false, didFlag = false;
+        td.addEventListener('touchstart', function(e) {
+          e.preventDefault();
+          mv = false; didFlag = false;
+          pt = setTimeout(function() { didFlag = true; doFlag(r, c); }, 450);
+        }, false);
+        td.addEventListener('touchmove', function(e) {
+          e.preventDefault();
+          clearTimeout(pt); mv = true;
+        }, false);
+        td.addEventListener('touchend', function(e) {
+          e.preventDefault();
+          clearTimeout(pt);
+          if (!mv && !didFlag) tap(r, c);
+        }, false);
+        td.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+        tr.appendChild(td);
+      })(r, c);
+    }
+    tbl.appendChild(tr);
+  }
+  brd.appendChild(tbl);
+}
+
+initGame();
+</script>
+</body>
+</html>

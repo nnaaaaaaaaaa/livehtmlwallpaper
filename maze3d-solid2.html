@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D Maze Solid</title>
+<style>*{margin:0;padding:0}body{background:#000;overflow:hidden}</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+// Offscreen canvas — all drawing happens here, then blitted in one call
+const off = document.createElement("canvas");
+const g2 = off.getContext("2d");
+let W, H, CX, CY, PROJ;
+const WALL_H = 0.5;
+const NEAR = 0.06;
+const VR = 8;
+
+function resize() {
+  W = canvas.width = off.width = window.innerWidth;
+  H = canvas.height = off.height = window.innerHeight;
+  CX = W/2; CY = H/2;
+  PROJ = (W/2) / Math.tan(Math.PI * 0.325);
+}
+resize();
+window.addEventListener("resize", resize);
+
+// --- Maze ---
+const MW=19, MH=19;
+const DX=[0,1,0,-1], DY=[-1,0,1,0];
+const OPP=[2,3,0,1];
+const DN=['n','e','s','w'];
+let maze=[];
+function initMaze() {
+  maze=Array.from({length:MH},()=>Array.from({length:MW},()=>({n:true,e:true,s:true,w:true})));
+  const vis=Array.from({length:MH},()=>new Array(MW).fill(false));
+  const stk=[[1,1]]; vis[1][1]=true;
+  while(stk.length){
+    const[cx,cy]=stk[stk.length-1];
+    const nb=[];
+    for(let d=0;d<4;d++){const nx=cx+DX[d],ny=cy+DY[d];if(nx>0&&nx<MW-1&&ny>0&&ny<MH-1&&!vis[ny][nx])nb.push([nx,ny,d]);}
+    if(!nb.length){stk.pop();continue;}
+    const[nx,ny,d]=nb[Math.floor(Math.random()*nb.length)];
+    maze[cy][cx][DN[d]]=false;maze[ny][nx][DN[OPP[d]]]=false;
+    vis[ny][nx]=true;stk.push([nx,ny]);
+  }
+}
+initMaze();
+
+// --- Camera ---
+let camX=1.5, camZ=1.5, camAngle=0;
+let camFX=1, camFZ=0;
+function syncForward(){ camFX=Math.cos(camAngle); camFZ=Math.sin(camAngle); }
+
+function camSpace(wx, wz) {
+  const dx=wx-camX, dz=wz-camZ;
+  return { cx: -dx*camFZ+dz*camFX, cz: dx*camFX+dz*camFZ };
+}
+function project(cx, cy_w, cz) {
+  if(cz<=NEAR) return null;
+  return { sx: CX+(cx/cz)*PROJ, sy: CY-(cy_w/cz)*PROJ };
+}
+function clipNear(a, b) {
+  if(a.cz<=NEAR&&b.cz<=NEAR) return null;
+  if(a.cz>NEAR&&b.cz>NEAR) return [a,b];
+  const t=(NEAR-a.cz)/(b.cz-a.cz);
+  const m={cx:a.cx+t*(b.cx-a.cx),cz:NEAR};
+  return a.cz<=NEAR?[m,b]:[a,m];
+}
+
+// --- Wall collection + painter's sort ---
+let wallBuf=[];
+
+function collectWall(wx1,wz1,wx2,wz2) {
+  const a=camSpace(wx1,wz1), b=camSpace(wx2,wz2);
+  const cl=clipNear(a,b); if(!cl) return;
+  const[p,q]=cl;
+  const depth=(p.cz+q.cz)*0.5;
+  const bl=project(p.cx, WALL_H,p.cz), tl=project(p.cx,-WALL_H,p.cz);
+  const br=project(q.cx, WALL_H,q.cz), tr=project(q.cx,-WALL_H,q.cz);
+  if(!bl||!tl||!br||!tr) return;
+  wallBuf.push({
+    depth,
+    al: Math.max(0.05,Math.min(0.95,1.08-depth*0.11)),
+    lw: Math.max(0.7,3.0-depth*0.2),
+    bl,tl,br,tr
+  });
+}
+
+function flushWalls() {
+  wallBuf.sort((a,b)=>b.depth-a.depth);
+  for(const w of wallBuf) {
+    // Fill with black on offscreen canvas
+    g2.fillStyle='#000';
+    g2.beginPath();
+    g2.moveTo(w.bl.sx,w.bl.sy);
+    g2.lineTo(w.tl.sx,w.tl.sy);
+    g2.lineTo(w.tr.sx,w.tr.sy);
+    g2.lineTo(w.br.sx,w.br.sy);
+    g2.closePath();
+    g2.fill();
+    // Draw wireframe edges
+    g2.strokeStyle=`hsla(${hue},85%,65%,${w.al})`;
+    g2.lineWidth=w.lw;
+    g2.beginPath();g2.moveTo(w.bl.sx,w.bl.sy);g2.lineTo(w.tl.sx,w.tl.sy);g2.stroke();
+    g2.beginPath();g2.moveTo(w.br.sx,w.br.sy);g2.lineTo(w.tr.sx,w.tr.sy);g2.stroke();
+    g2.beginPath();g2.moveTo(w.tl.sx,w.tl.sy);g2.lineTo(w.tr.sx,w.tr.sy);g2.stroke();
+    g2.beginPath();g2.moveTo(w.bl.sx,w.bl.sy);g2.lineTo(w.br.sx,w.br.sy);g2.stroke();
+  }
+  wallBuf=[];
+}
+
+function renderScene() {
+  const ox=Math.floor(camX), oz=Math.floor(camZ);
+  for(let z=Math.max(0,oz-VR);z<=Math.min(MH-1,oz+VR);z++) {
+    for(let x=Math.max(0,ox-VR);x<=Math.min(MW-1,ox+VR);x++) {
+      if(!maze[z]||!maze[z][x]) continue;
+      const c=maze[z][x];
+      if(c.n) collectWall(x,z,x+1,z);
+      if(c.w) collectWall(x,z,x,z+1);
+      if(z===MH-1&&c.s) collectWall(x,z+1,x+1,z+1);
+      if(x===MW-1&&c.e) collectWall(x+1,z,x+1,z+1);
+    }
+  }
+  flushWalls();
+}
+
+// --- Color ---
+let hue=140, tHue=140, hueT=1;
+function sched(){setTimeout(()=>{tHue=Math.random()*360;hueT=0;sched();},5000+Math.random()*12000);}
+sched();
+function lerpHue(a,b,t){let d=((b-a+540)%360)-180;return(a+d*t+360)%360;}
+
+// --- State machine ---
+const T_WALK=252, T_TURN=238, T_PAUSE=22;
+let st='PAUSE',sf=0;
+let fromX=1.5,fromZ=1.5,fromAngle=0;
+let destX=1.5,destZ=1.5;
+let curMX=1,curMZ=1,curDir=1;
+let visited=new Set(['1,1']);
+let pendingWalk=null;
+
+function ease(t){return .5-.5*Math.cos(t*Math.PI);}
+function normA(a){return((a%(Math.PI*2))+Math.PI*2)%(Math.PI*2);}
+function lerpAngle(a,b,t){
+  a=normA(a);b=normA(b);
+  let d=b-a;
+  if(d>Math.PI)d-=Math.PI*2;
+  if(d<-Math.PI)d+=Math.PI*2;
+  return a+d*t;
+}
+function dirAngle(d){return[Math.PI*1.5,0,Math.PI*0.5,Math.PI][d];}
+
+function pick(){
+  const opts=[];
+  for(let d=0;d<4;d++){
+    if(maze[curMZ][curMX][DN[d]])continue;
+    const nx=curMX+DX[d],nz=curMZ+DY[d];
+    opts.push({d,nx,nz,fresh:!visited.has(`${nx},${nz}`)});
+  }
+  if(!opts.length)return null;
+  const nb=opts.filter(o=>o.d!==OPP[curDir]);
+  const pool=nb.length?nb:opts;
+  const fresh=pool.filter(o=>o.fresh);
+  return(fresh.length?fresh:pool)[Math.floor(Math.random()*(fresh.length||pool.length))];
+}
+
+function startWalk(mv){
+  fromX=camX;fromZ=camZ;
+  destX=mv.nx+0.5;destZ=mv.nz+0.5;
+  sf=0;st='WALK';
+}
+
+function tick(){
+  sf++;
+  if(st==='PAUSE'){
+    if(sf<T_PAUSE)return;
+    sf=0;
+    const mv=pick();
+    if(!mv){initMaze();camX=1.5;camZ=1.5;camAngle=0;curMX=1;curMZ=1;curDir=1;visited.clear();syncForward();return;}
+    if(mv.d!==curDir){
+      fromAngle=camAngle;curDir=mv.d;pendingWalk=mv;st='TURN';
+    } else { startWalk(mv); }
+  } else if(st==='TURN'){
+    const t=ease(Math.min(1,sf/T_TURN));
+    camAngle=lerpAngle(fromAngle,dirAngle(curDir),t);
+    syncForward();
+    if(sf>=T_TURN){sf=0;if(pendingWalk){startWalk(pendingWalk);pendingWalk=null;}}
+  } else if(st==='WALK'){
+    const t=ease(Math.min(1,sf/T_WALK));
+    camX=fromX+(destX-fromX)*t;
+    camZ=fromZ+(destZ-fromZ)*t;
+    if(sf>=T_WALK){
+      camX=destX;camZ=destZ;
+      curMX=Math.round(destX-0.5);curMZ=Math.round(destZ-0.5);
+      visited.add(`${curMX},${curMZ}`);
+      if(visited.size>MW*MH*0.75)visited.clear();
+      st='PAUSE';sf=0;
+    }
+  }
+}
+
+function loop(){
+  if(hueT<1){hueT=Math.min(1,hueT+.005);hue=lerpHue(hue,tHue,hueT);}
+  tick();
+
+  // Draw everything to offscreen canvas
+  g2.fillStyle='#000';g2.fillRect(0,0,W,H);
+  const gr=g2.createRadialGradient(CX,CY,0,CX,CY,Math.max(W,H)*.52);
+  gr.addColorStop(0,`hsla(${hue},50%,6%,1)`);gr.addColorStop(1,'#000');
+  g2.fillStyle=gr;g2.fillRect(0,0,W,H);
+  renderScene();
+
+  // Blit completed frame to visible canvas in one shot — no intermediate states visible
+  ctx.drawImage(off,0,0);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
