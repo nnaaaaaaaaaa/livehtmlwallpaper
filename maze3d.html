@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D Maze</title>
+<style>*{margin:0;padding:0}body{background:#000;overflow:hidden}</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+let W, H, CX, CY, PROJ;
+const WALL_H = 0.5;
+const NEAR = 0.06;
+const VR = 8; // vision radius in cells
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  CX = W/2; CY = H/2;
+  PROJ = (W/2) / Math.tan(Math.PI * 0.325); // ~65° FOV
+}
+resize();
+window.addEventListener("resize", resize);
+
+// --- Maze (19x19, recursive backtracker) ---
+const MW=19, MH=19;
+const DX=[0,1,0,-1], DY=[-1,0,1,0];
+const OPP=[2,3,0,1];
+const DN=['n','e','s','w'];
+let maze=[];
+function initMaze() {
+  maze=Array.from({length:MH},()=>Array.from({length:MW},()=>({n:true,e:true,s:true,w:true})));
+  const vis=Array.from({length:MH},()=>new Array(MW).fill(false));
+  const stk=[[1,1]]; vis[1][1]=true;
+  while(stk.length){
+    const[cx,cy]=stk[stk.length-1];
+    const nb=[];
+    for(let d=0;d<4;d++){const nx=cx+DX[d],ny=cy+DY[d];if(nx>0&&nx<MW-1&&ny>0&&ny<MH-1&&!vis[ny][nx])nb.push([nx,ny,d]);}
+    if(!nb.length){stk.pop();continue;}
+    const[nx,ny,d]=nb[Math.floor(Math.random()*nb.length)];
+    maze[cy][cx][DN[d]]=false;maze[ny][nx][DN[OPP[d]]]=false;
+    vis[ny][nx]=true;stk.push([nx,ny]);
+  }
+}
+initMaze();
+
+// --- Camera ---
+// angle: 0=East, π/2=South, π=West, 3π/2=North (increases clockwise on map)
+let camX=1.5, camZ=1.5, camAngle=0;
+let camFX=1, camFZ=0; // forward unit vector
+
+function syncForward() {
+  camFX=Math.cos(camAngle); camFZ=Math.sin(camAngle);
+}
+
+function camSpace(wx, wz) {
+  const dx=wx-camX, dz=wz-camZ;
+  return {
+    cx: -dx*camFZ + dz*camFX, // rightward
+    cz:  dx*camFX + dz*camFZ  // forward
+  };
+}
+
+function project(cx, cy_w, cz) {
+  if(cz<=NEAR) return null;
+  return { sx: CX+(cx/cz)*PROJ, sy: CY-(cy_w/cz)*PROJ };
+}
+
+function clipNear(a, b) {
+  if(a.cz<=NEAR && b.cz<=NEAR) return null;
+  if(a.cz>NEAR && b.cz>NEAR) return [a,b];
+  const t=(NEAR-a.cz)/(b.cz-a.cz);
+  const m={cx:a.cx+t*(b.cx-a.cx), cz:NEAR};
+  return a.cz<=NEAR?[m,b]:[a,m];
+}
+
+function wall(wx1,wz1, wx2,wz2) {
+  const a=camSpace(wx1,wz1), b=camSpace(wx2,wz2);
+  const cl=clipNear(a,b); if(!cl) return;
+  const [p,q]=cl;
+  const d=(p.cz+q.cz)*0.5;
+  const al=Math.max(0.05, Math.min(0.95, 1.08-d*0.11));
+  const lw=Math.max(0.6, 3.0-d*0.2);
+  const bl=project(p.cx, WALL_H,p.cz), tl=project(p.cx,-WALL_H,p.cz);
+  const br=project(q.cx, WALL_H,q.cz), tr=project(q.cx,-WALL_H,q.cz);
+  if(!bl||!tl||!br||!tr) return;
+  ctx.strokeStyle=`hsla(${hue},85%,65%,${al})`;
+  ctx.lineWidth=lw;
+  ctx.beginPath();ctx.moveTo(bl.sx,bl.sy);ctx.lineTo(tl.sx,tl.sy);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(br.sx,br.sy);ctx.lineTo(tr.sx,tr.sy);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(tl.sx,tl.sy);ctx.lineTo(tr.sx,tr.sy);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(bl.sx,bl.sy);ctx.lineTo(br.sx,br.sy);ctx.stroke();
+}
+
+function renderScene() {
+  const ox=Math.floor(camX), oz=Math.floor(camZ);
+  for(let z=Math.max(0,oz-VR);z<=Math.min(MH-1,oz+VR);z++) {
+    for(let x=Math.max(0,ox-VR);x<=Math.min(MW-1,ox+VR);x++) {
+      if(!maze[z]||!maze[z][x]) continue;
+      const c=maze[z][x];
+      if(c.n) wall(x,z, x+1,z);
+      if(c.w) wall(x,z, x,z+1);
+      if(z===MH-1&&c.s) wall(x,z+1,x+1,z+1);
+      if(x===MW-1&&c.e) wall(x+1,z,x+1,z+1);
+    }
+  }
+}
+
+// --- Color ---
+let hue=140, tHue=140, hueT=1;
+function sched(){setTimeout(()=>{tHue=Math.random()*360;hueT=0;sched();},5000+Math.random()*12000);}
+sched();
+function lerpHue(a,b,t){let d=((b-a+540)%360)-180;return(a+d*t+360)%360;}
+
+// --- State machine ---
+// PAUSE → (TURN →) WALK → PAUSE
+const T_WALK=252, T_TURN=238, T_PAUSE=22;
+let st='PAUSE', sf=0;
+let fromX=1.5,fromZ=1.5, fromAngle=0;
+let destX=1.5,destZ=1.5;
+let curMX=1,curMZ=1,curDir=1;
+let visited=new Set(['1,1']);
+let pendingWalk=null;
+
+function ease(t){return .5-.5*Math.cos(t*Math.PI);}
+
+function normAngle(a){return((a%(Math.PI*2))+Math.PI*2)%(Math.PI*2);}
+
+function lerpAngle(a,b,t){
+  a=normAngle(a); b=normAngle(b);
+  let d=b-a;
+  if(d>Math.PI)d-=Math.PI*2;
+  if(d<-Math.PI)d+=Math.PI*2;
+  return a+d*t;
+}
+
+function dirAngle(d){return[Math.PI*1.5,0,Math.PI*0.5,Math.PI][d];}
+
+function pick(){
+  const opts=[];
+  for(let d=0;d<4;d++){
+    if(maze[curMZ][curMX][DN[d]])continue;
+    const nx=curMX+DX[d],nz=curMZ+DY[d];
+    opts.push({d,nx,nz,fresh:!visited.has(`${nx},${nz}`)});
+  }
+  if(!opts.length)return null;
+  const nb=opts.filter(o=>o.d!==OPP[curDir]);
+  const pool=nb.length?nb:opts;
+  const fresh=pool.filter(o=>o.fresh);
+  return(fresh.length?fresh:pool)[Math.floor(Math.random()*(fresh.length||pool.length))];
+}
+
+function tick(){
+  sf++;
+  if(st==='PAUSE'){
+    if(sf<T_PAUSE)return;
+    sf=0;
+    const mv=pick();
+    if(!mv){initMaze();camX=1.5;camZ=1.5;camAngle=0;curMX=1;curMZ=1;curDir=1;visited.clear();syncForward();return;}
+    if(mv.d!==curDir){
+      fromAngle=camAngle;
+      curDir=mv.d;
+      pendingWalk=mv;
+      st='TURN';
+    } else {
+      startWalk(mv);
+    }
+  } else if(st==='TURN'){
+    const t=ease(Math.min(1,sf/T_TURN));
+    camAngle=lerpAngle(fromAngle,dirAngle(curDir),t);
+    syncForward();
+    if(sf>=T_TURN){sf=0;if(pendingWalk){startWalk(pendingWalk);pendingWalk=null;}}
+  } else if(st==='WALK'){
+    const t=ease(Math.min(1,sf/T_WALK));
+    camX=fromX+(destX-fromX)*t;
+    camZ=fromZ+(destZ-fromZ)*t;
+    if(sf>=T_WALK){
+      camX=destX;camZ=destZ;
+      curMX=Math.round(destX-0.5);curMZ=Math.round(destZ-0.5);
+      visited.add(`${curMX},${curMZ}`);
+      if(visited.size>MW*MH*0.75)visited.clear();
+      st='PAUSE';sf=0;
+    }
+  }
+}
+
+function startWalk(mv){
+  fromX=camX;fromZ=camZ;
+  destX=mv.nx+0.5;destZ=mv.nz+0.5;
+  sf=0;st='WALK';
+}
+
+// --- Loop ---
+function loop(){
+  if(hueT<1){hueT=Math.min(1,hueT+.005);hue=lerpHue(hue,tHue,hueT);}
+  tick();
+  ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
+  const g=ctx.createRadialGradient(CX,CY,0,CX,CY,Math.max(W,H)*.52);
+  g.addColorStop(0,`hsla(${hue},50%,6%,1)`);g.addColorStop(1,'#000');
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+  renderScene();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
